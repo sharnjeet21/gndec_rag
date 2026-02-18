@@ -44,7 +44,7 @@ faiss-cpu or faiss-gpu
 
 Setup
 1. Clone Repository
-git clone https://github.com/yourusername/gndec-rag-advanced.git
+git clone https://github.com/sharnjeet21/gndec-rag-advanced.git
 cd gndec-rag-advanced
 
 2. Create Python Virtual Environment
