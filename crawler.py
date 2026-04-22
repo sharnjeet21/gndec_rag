@@ -17,6 +17,15 @@ SKIP_PATHS = ["/gallery"]
 DOWNLOAD_DIR = "temp_files"
 MAX_FILE_SIZE = 10_000_000  # 10MB limit
 
+# DB config — edit these if your PostgreSQL uses a different user/password
+DB_CONFIG = {
+    "dbname": "gndec_rag",
+    "user": "postgres",
+    "password": "",       # set your password here if needed
+    "host": "localhost",
+    "port": 5432,
+}
+
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 visited = set()
@@ -27,31 +36,36 @@ queue = [BASE_URL]
 # =========================
 
 MEDIA_EXTENSIONS = {
-    # Images
     ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg",
     ".tiff", ".tif", ".ico", ".heic", ".heif",
-
-    # Video
     ".mp4", ".m4v", ".mov", ".avi", ".mkv", ".wmv", ".flv",
     ".webm", ".mpg", ".mpeg", ".3gp", ".3g2", ".ts", ".mts",
-
-    # Audio
     ".mp3", ".wav", ".aac", ".flac", ".ogg", ".oga",
     ".wma", ".m4a", ".amr", ".opus",
-
-    # Archives
     ".zip", ".rar", ".7z", ".tar", ".gz",
-
-    # Executables
     ".exe", ".msi", ".dmg", ".apk"
 }
 
 # =========================
-# DATABASE CONNECTION
+# DATABASE SETUP
 # =========================
 
-conn = psycopg2.connect(dbname="gndec_rag")
+conn = psycopg2.connect(**DB_CONFIG)
 cur = conn.cursor()
+
+# Create table if it doesn't exist — no manual SQL needed
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS pages (
+        id SERIAL PRIMARY KEY,
+        url TEXT NOT NULL,
+        title TEXT,
+        section_title TEXT,
+        content TEXT,
+        file_type TEXT,
+        UNIQUE (url, section_title, content)
+    )
+""")
+conn.commit()
 
 # =========================
 # HELPERS
@@ -101,10 +115,11 @@ def save_to_db(url, title, section_title, content, file_type="html"):
         cur.execute("""
             INSERT INTO pages (url, title, section_title, content, file_type)
             VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT DO NOTHING
+            ON CONFLICT (url, section_title, content) DO NOTHING
         """, (url, title, section_title, content, file_type))
         conn.commit()
     except Exception as e:
+        conn.rollback()
         print("DB error:", e)
 
 
@@ -112,7 +127,7 @@ def safe_head_request(url):
     try:
         response = requests.head(url, timeout=5, allow_redirects=True)
         return response.headers
-    except:
+    except Exception:
         return {}
 
 # =========================
@@ -130,6 +145,11 @@ def extract_pdf_text(url):
 
         filename = os.path.join(DOWNLOAD_DIR, "temp.pdf")
         response = requests.get(url, timeout=20)
+
+        # Double-check actual size after download
+        if len(response.content) > MAX_FILE_SIZE:
+            print("Large PDF skipped after download:", url)
+            return ""
 
         with open(filename, "wb") as f:
             f.write(response.content)
@@ -165,6 +185,10 @@ def extract_docx_text(url):
         filename = os.path.join(DOWNLOAD_DIR, "temp.docx")
         response = requests.get(url, timeout=20)
 
+        if len(response.content) > MAX_FILE_SIZE:
+            print("Large DOCX skipped after download:", url)
+            return ""
+
         with open(filename, "wb") as f:
             f.write(response.content)
 
@@ -194,7 +218,6 @@ while queue:
 
     parsed_path = urlparse(url).path.lower()
 
-    # Skip all media/archives/executables
     if any(parsed_path.endswith(ext) for ext in MEDIA_EXTENSIONS):
         print("Media skipped:", url)
         continue
@@ -209,7 +232,6 @@ while queue:
 
             if len(pdf_text) > 200:
                 save_to_db(url, "PDF Document", "PDF Content", pdf_text, "pdf")
-                save_to_db(url, "PDF Document", "Source URL", url, "pdf_url")
 
             continue
 
@@ -219,7 +241,6 @@ while queue:
 
             if len(doc_text) > 200:
                 save_to_db(url, "DOCX Document", "DOCX Content", doc_text, "docx")
-                save_to_db(url, "DOCX Document", "Source URL", url, "docx_url")
 
             continue
 
@@ -253,7 +274,7 @@ while queue:
         time.sleep(1)
 
     except Exception as e:
-        print("Error:", e)
+        print("Error scraping", url, ":", e)
 
 cur.close()
 conn.close()
