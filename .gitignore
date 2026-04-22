@@ -1,4 +1,7 @@
-temmp_files
-venv/
-venv/
+*.bin
+*.pkl
+data.json
+temp_files/
+Colab/
+__pycache__/
 venv/
