@@ -9,7 +9,14 @@ from sentence_transformers import SentenceTransformer
 # CONFIG
 # =========================
 
-DB_NAME = "gndec_rag"
+DB_CONFIG = {
+    "dbname": "gndec_rag",
+    "user": "postgres",
+    "password": "",       # set your password here if needed
+    "host": "localhost",
+    "port": 5432,
+}
+
 EMBED_MODEL = "BAAI/bge-base-en-v1.5"
 INDEX_FILE = "faiss_index.bin"
 ID_MAP_FILE = "id_map.pkl"
@@ -19,13 +26,13 @@ ID_MAP_FILE = "id_map.pkl"
 # =========================
 
 print("Connecting to DB...")
-conn = psycopg2.connect(dbname=DB_NAME)
+conn = psycopg2.connect(**DB_CONFIG)
 cur = conn.cursor()
 
 cur.execute("""
     SELECT url, section_title, content
     FROM pages
-    WHERE content IS NOT NULL
+    WHERE content IS NOT NULL AND content != ''
 """)
 
 rows = cur.fetchall()
@@ -54,19 +61,24 @@ def chunk_text(text, chunk_size=700, overlap=150):
 # =========================
 
 texts = []
+# Each entry stores both the chunk text and its source URL
+# This fixes the retrieval bug — no DB re-query needed at query time
 metadata = []
+
+seen_chunks = set()  # deduplicate identical chunks
 
 for url, section_title, content in rows:
     full_text = f"{section_title}\n{content}"
-
     chunks = chunk_text(full_text)
 
     for chunk in chunks:
-        if len(chunk.strip()) > 50:
+        chunk = chunk.strip()
+        if len(chunk) > 50 and chunk not in seen_chunks:
+            seen_chunks.add(chunk)
             texts.append(chunk)
-            metadata.append(url)
+            metadata.append({"url": url, "text": chunk})
 
-print(f"Total chunks created: {len(texts)}")
+print(f"Total unique chunks created: {len(texts)}")
 
 # =========================
 # LOAD EMBEDDING MODEL
@@ -88,7 +100,7 @@ embeddings = model.encode(
 # =========================
 
 dimension = embeddings.shape[1]
-index = faiss.IndexFlatIP(dimension)  # cosine similarity
+index = faiss.IndexFlatIP(dimension)  # cosine similarity with normalized vectors
 index.add(embeddings)
 
 print("Saving index...")
@@ -97,4 +109,4 @@ faiss.write_index(index, INDEX_FILE)
 with open(ID_MAP_FILE, "wb") as f:
     pickle.dump(metadata, f)
 
-print("Index build complete.")
+print(f"Index build complete. {len(texts)} vectors stored.")
