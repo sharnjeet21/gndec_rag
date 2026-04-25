@@ -15,7 +15,7 @@ ID_MAP_FILE = "id_map.pkl"
 EMBED_MODEL = "BAAI/bge-base-en-v1.5"
 
 LLAMA_URL = "http://127.0.0.1:8080/v1/chat/completions"
-TOP_K = 8
+TOP_K = 7
 MAX_CONTEXT_CHARS = 9000
 
 # =========================
@@ -54,6 +54,10 @@ print(f"Index loaded: {index.ntotal} vectors")
 # =========================
 
 def retrieve(query):
+    query = query.lower()
+    if "principle" in query:
+        query = query.replace("principle", "principal")
+
     query_embedding = model.encode(
         [query],
         convert_to_numpy=True,
@@ -62,9 +66,7 @@ def retrieve(query):
 
     distances, indices = index.search(query_embedding, TOP_K)
 
-    results = []
-    sources = []
-    seen_urls = set()
+    scored_entries = []
 
     for i, idx in enumerate(indices[0]):
         if idx == -1:
@@ -74,16 +76,60 @@ def retrieve(query):
             continue
 
         entry = id_map[idx]
+        score = float(distances[0][i])
+        
+        priority = entry.get("priority", "medium")
+        source_type = entry.get("source_type", "")
 
-        # Use the stored chunk text directly — no DB re-query needed
-        chunk_text = entry["text"]
-        url = entry["url"]
+        # Priority weighting
+        if priority == "high":
+            score = score * 1.3
+        elif priority == "low":
+            score = score * 0.6
+        else:
+            score = score * 1.0
 
-        results.append(chunk_text)
+        if source_type == "pdf":
+            score = score * 0.6
+            
+        if entry["url"] == "manual_entry":
+            score = score * 1.5
+            
+        scored_entries.append({
+            "score": score,
+            "text": entry["text"],
+            "url": entry["url"],
+            "priority": priority,
+            "source_type": source_type
+        })
+        
+    # Sort by score descending
+    scored_entries.sort(key=lambda x: x["score"], reverse=True)
 
-        if url not in seen_urls:
-            sources.append(url)
-            seen_urls.add(url)
+    results = []
+    sources = []
+    seen_urls = set()
+    seen_texts = set()
+
+    print("\n--- DEBUG: RETRIEVAL RESULTS ---")
+    for item in scored_entries:
+        print(f"Score: {item['score']:.4f} | Priority: {item['priority']} | Type: {item['source_type']} | URL: {item['url']}")
+        
+        # Limit to top 5 chunks
+        if len(results) >= 5:
+            continue
+            
+        # Remove duplicate text chunks
+        if item["text"] in seen_texts:
+            continue
+            
+        results.append(item["text"])
+        seen_texts.add(item["text"])
+
+        if item["url"] not in seen_urls:
+            sources.append(item["url"])
+            seen_urls.add(item["url"])
+    print("--------------------------------")
 
     return results, sources
 
@@ -119,15 +165,14 @@ while True:
     if len(context) > MAX_CONTEXT_CHARS:
         context = context[:MAX_CONTEXT_CHARS]
 
-    prompt = f"""You are a helpful assistant answering questions about GNDEC (Guru Nanak Dev Engineering College).
-Use the provided context to answer the question. If the context contains relevant information, use it.
-If the context does not contain enough information, answer based on your general knowledge about GNDEC.
-Keep your answer clear and concise.
+    prompt = f"""Provide a clear, concise, and professional answer using ONLY the provided context.
+If the answer is not present in the context, respond with 'I don't know'.
 
 Context:
 {context}
 
-Question: {query}
+Question:
+{query}
 
 Answer:"""
 
