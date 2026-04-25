@@ -1,6 +1,6 @@
 import faiss
 import pickle
-import psycopg2
+import json
 import numpy as np
 from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
@@ -9,37 +9,22 @@ from sentence_transformers import SentenceTransformer
 # CONFIG
 # =========================
 
-DB_CONFIG = {
-    "dbname": "gndec_rag",
-    "user": "postgres",
-    "password": "",       # set your password here if needed
-    "host": "localhost",
-    "port": 5432,
-}
-
-EMBED_MODEL = "BAAI/bge-base-en-v1.5"
+DATA_FILE = "data_final.json"
 INDEX_FILE = "faiss_index.bin"
 ID_MAP_FILE = "id_map.pkl"
 
+EMBED_MODEL = "BAAI/bge-base-en-v1.5"
+
 # =========================
-# CONNECT DB
+# LOAD DATA
 # =========================
 
-print("Connecting to DB...")
-conn = psycopg2.connect(**DB_CONFIG)
-cur = conn.cursor()
+print("Loading dataset...")
 
-cur.execute("""
-    SELECT url, section_title, content
-    FROM pages
-    WHERE content IS NOT NULL AND content != ''
-""")
+with open(DATA_FILE, "r") as f:
+    rows = json.load(f)
 
-rows = cur.fetchall()
-print(f"Fetched {len(rows)} rows from DB")
-
-cur.close()
-conn.close()
+print(f"Loaded {len(rows)} records")
 
 # =========================
 # CHUNKING FUNCTION
@@ -47,66 +32,141 @@ conn.close()
 
 def chunk_text(text, chunk_size=700, overlap=150):
     chunks = []
-    start = 0
+    text = str(text)
 
+    start = 0
     while start < len(text):
         end = start + chunk_size
-        chunks.append(text[start:end])
+        chunk = text[start:end]
+        chunks.append(chunk)
         start += chunk_size - overlap
 
     return chunks
 
 # =========================
-# PREPARE TEXTS
+# PREPARE TEXTS (CLEAN)
 # =========================
 
 texts = []
-# Each entry stores both the chunk text and its source URL
-# This fixes the retrieval bug — no DB re-query needed at query time
 metadata = []
+seen_chunks = set()
 
-seen_chunks = set()  # deduplicate identical chunks
+print("Preparing chunks...")
 
-for url, section_title, content in rows:
-    full_text = f"{section_title}\n{content}"
-    chunks = chunk_text(full_text)
+for item in rows:
+    try:
+        url = str(item.get("url", ""))
 
-    for chunk in chunks:
-        chunk = chunk.strip()
-        if len(chunk) > 50 and chunk not in seen_chunks:
+        section_title = str(item.get("section_title", ""))
+        content = str(item.get("content", ""))
+
+        full_text = section_title + "\n" + content
+
+        if len(full_text.strip()) == 0:
+            continue
+
+        chunks = chunk_text(full_text)
+
+        for chunk in chunks:
+            if not isinstance(chunk, str):
+                continue
+
+            chunk = chunk.strip()
+
+            if len(chunk) < 50:
+                continue
+
+            # UTF-8 safe
+            try:
+                chunk.encode("utf-8")
+            except:
+                continue
+
+            if chunk in seen_chunks:
+                continue
+
             seen_chunks.add(chunk)
+
             texts.append(chunk)
-            metadata.append({"url": url, "text": chunk})
+            metadata.append({
+                "url": url,
+                "text": chunk
+            })
 
-print(f"Total unique chunks created: {len(texts)}")
+    except Exception as e:
+        print("Skipping bad record:", e)
+
+print(f"Total clean chunks: {len(texts)}")
 
 # =========================
-# LOAD EMBEDDING MODEL
+# FINAL CLEAN FILTER
 # =========================
 
-print("Loading embedding model...")
+texts = [t for t in texts if isinstance(t, str) and len(t.strip()) > 0]
+
+print("Final texts count:", len(texts))
+
+# =========================
+# LOAD MODEL (GPU)
+# =========================
+
+print("Loading embedding model on GPU...")
+
 model = SentenceTransformer(EMBED_MODEL)
 
+# =========================
+# GENERATE EMBEDDINGS
+# =========================
+
 print("Generating embeddings...")
-embeddings = model.encode(
-    texts,
-    show_progress_bar=True,
-    convert_to_numpy=True,
-    normalize_embeddings=True
-)
+
+try:
+    embeddings = model.encode(
+        texts,
+        batch_size=32,   # GPU optimized
+        show_progress_bar=True,
+        convert_to_numpy=True,
+        normalize_embeddings=True
+    )
+
+except Exception as e:
+    print("Batch encoding failed:", e)
+    print("Falling back to safe encoding...")
+
+    embeddings_list = []
+    for t in tqdm(texts):
+        try:
+            emb = model.encode(
+                t,
+                convert_to_numpy=True,
+                normalize_embeddings=True
+            )
+            embeddings_list.append(emb)
+        except:
+            continue
+
+    embeddings = np.array(embeddings_list)
 
 # =========================
 # BUILD FAISS INDEX
 # =========================
 
 dimension = embeddings.shape[1]
-index = faiss.IndexFlatIP(dimension)  # cosine similarity with normalized vectors
+
+print("Building FAISS index...")
+
+index = faiss.IndexFlatIP(dimension)
 index.add(embeddings)
 
+# =========================
+# SAVE
+# =========================
+
 print("Saving index...")
+
 faiss.write_index(index, INDEX_FILE)
 
 with open(ID_MAP_FILE, "wb") as f:
     pickle.dump(metadata, f)
 
-print(f"Index build complete. {len(texts)} vectors stored.")
+print(f"Index build complete: {len(embeddings)} vectors stored.")
