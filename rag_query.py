@@ -76,6 +76,12 @@ def retrieve(query):
             continue
 
         entry = id_map[idx]
+        url = entry.get("url", "")
+
+        # HARD FILTER: skip PDFs completely
+        if ".pdf" in url.lower():
+            continue
+
         score = float(distances[0][i])
         
         priority = entry.get("priority", "medium")
@@ -93,7 +99,7 @@ def retrieve(query):
             score = score * 0.6
             
         if entry["url"] == "manual_entry":
-            score = score * 1.5
+            score = score * 2.0
             
         scored_entries.append({
             "score": score,
@@ -116,7 +122,7 @@ def retrieve(query):
         print(f"Score: {item['score']:.4f} | Priority: {item['priority']} | Type: {item['source_type']} | URL: {item['url']}")
         
         # Limit to top 5 chunks
-        if len(results) >= 5:
+        if len(results) >= 4:
             continue
             
         # Remove duplicate text chunks
