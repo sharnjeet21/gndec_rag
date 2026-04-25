@@ -5,3 +5,8 @@ temp_files/
 Colab/
 __pycache__/
 venv/
+llama.cpp/
+explaning/
+.vscode/
+data_final.json
+gndec_rag_full.backup
